@@ -95,8 +95,16 @@ class MainWindow:
         self._scale = self.settings.pixels_per_inch or 3.0
         self._highlighted_lines: set[int] = set()
         self.view_rotation: float = self.settings.view_rotation
+        self.view_offset_x: float = 0.0
+        self.view_offset_y: float = 0.0
+        self._auto_scale: bool = True
         self._dragging_compass = False
         self._pending_click = False
+        self._pan_active = False
+        self._press_x = 0
+        self._press_y = 0
+        self._last_drag_x = 0
+        self._last_drag_y = 0
 
         self._build_toolbar()
         self._build_panes()
@@ -106,6 +114,7 @@ class MainWindow:
         self.canvas.bind("<ButtonPress-1>", self._on_canvas_press)
         self.canvas.bind("<B1-Motion>", self._on_canvas_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_canvas_release)
+        self.canvas.bind("<MouseWheel>", self._on_canvas_wheel)
 
     def _make_simulator(self) -> Simulator:
         return Simulator(
@@ -180,6 +189,9 @@ class MainWindow:
         self._highlighted_lines.clear()
         self.listbox.selection_clear(0, END)
         self.view_rotation = 0.0
+        self.view_offset_x = 0.0
+        self.view_offset_y = 0.0
+        self._auto_scale = True
         self._render()
 
     def open_settings(self) -> None:
@@ -214,6 +226,9 @@ class MainWindow:
         self.segments = self.simulator.run(self.commands)
         self.highlight = HighlightMap(self.commands, self.segments)
         self._highlighted_lines.clear()
+        self.view_offset_x = 0.0
+        self.view_offset_y = 0.0
+        self._auto_scale = True
 
         self._populate_listbox()
         self._render()
@@ -257,8 +272,12 @@ class MainWindow:
                                 fill="#444", tags=("grid",))
 
     def _autoscale(self, w: int, h: int) -> None:
+        if not self._auto_scale:
+            return
         if self.settings.pixels_per_inch > 0:
             self._scale = self.settings.pixels_per_inch
+            self.view_offset_x = 0.0
+            self.view_offset_y = 0.0
             return
         if not self.segments:
             return
@@ -270,15 +289,18 @@ class MainWindow:
                 max_abs = max(max_abs, abs(x), abs(y))
         usable = min(w, h) / 2 - 20
         self._scale = min(8.0, max(1.0, usable / max_abs))
+        self.view_offset_x = 0.0
+        self.view_offset_y = 0.0
 
     def _to_canvas(self, x: float, y: float) -> tuple[float, float]:
-        """World-frame (x, y) inches → canvas pixels with view rotation applied."""
+        """World-frame (x, y) inches → canvas pixels with view rotation+offset+scale applied."""
         θ = math.radians(self.view_rotation)
         rx = x * math.cos(θ) - y * math.sin(θ)
         ry = x * math.sin(θ) + y * math.cos(θ)
         w = self.canvas.winfo_width()
         h = self.canvas.winfo_height()
-        return (w / 2 + rx * self._scale, h / 2 - ry * self._scale)
+        return (w / 2 + rx * self._scale + self.view_offset_x,
+                h / 2 - ry * self._scale + self.view_offset_y)
 
     def _draw_segment(self, seg: TrajectorySegment) -> None:
         is_hl = seg.line in self._highlighted_lines
@@ -408,18 +430,29 @@ class MainWindow:
         if self._is_in_compass(event.x, event.y):
             self._dragging_compass = True
             self._update_rotation_from_event(event)
-        else:
-            self._press_x = event.x
-            self._press_y = event.y
-            self._pending_click = True
+            return
+        self._press_x = event.x
+        self._press_y = event.y
+        self._last_drag_x = event.x
+        self._last_drag_y = event.y
+        self._pending_click = True
+        self._pan_active = False
 
     def _on_canvas_drag(self, event: Any) -> None:
         if self._dragging_compass:
             self._update_rotation_from_event(event)
             return
-        if self._pending_click:
-            if (event.x - self._press_x) ** 2 + (event.y - self._press_y) ** 2 > 25:
-                self._pending_click = False
+        total_dx = event.x - self._press_x
+        total_dy = event.y - self._press_y
+        if not self._pan_active and (total_dx ** 2 + total_dy ** 2 > 25):
+            self._pan_active = True
+            self._pending_click = False
+        if self._pan_active:
+            self.view_offset_x += event.x - self._last_drag_x
+            self.view_offset_y += event.y - self._last_drag_y
+            self._render()
+        self._last_drag_x = event.x
+        self._last_drag_y = event.y
 
     def _on_canvas_release(self, event: Any) -> None:
         if self._dragging_compass:
@@ -429,9 +462,10 @@ class MainWindow:
             save_settings(self.settings)
             self._render()
             return
-        if self._pending_click:
+        if self._pending_click and not self._pan_active:
             self._on_canvas_click(event)
         self._pending_click = False
+        self._pan_active = False
 
     def _update_rotation_from_event(self, event: Any) -> None:
         cx, cy = self._compass_center(self.canvas.winfo_width(),
@@ -440,6 +474,23 @@ class MainWindow:
         dy = event.y - cy
         # angle CW from screen-up, in degrees
         self.view_rotation = math.degrees(math.atan2(dx, -dy))
+        self._render()
+
+    def _on_canvas_wheel(self, event: Any) -> None:
+        factor = 1.1 if event.delta > 0 else 1 / 1.1
+        self._zoom_at(event.x, event.y, factor)
+
+    def _zoom_at(self, mx: int, my: int, factor: float) -> None:
+        new_scale = max(0.5, min(50.0, self._scale * factor))
+        real_factor = new_scale / self._scale
+        self._auto_scale = False
+        w = self.canvas.winfo_width()
+        h = self.canvas.winfo_height()
+        pre_dx = mx - w / 2 - self.view_offset_x
+        pre_dy = my - h / 2 - self.view_offset_y
+        self._scale = new_scale
+        self.view_offset_x = mx - pre_dx * real_factor - w / 2
+        self.view_offset_y = my - pre_dy * real_factor - h / 2
         self._render()
 
     def _on_listbox_select(self, _event: Any) -> None:
