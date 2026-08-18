@@ -1,0 +1,13 @@
+# VEXAutoViz dependencies — all pre-installed on the dev environment.
+# No install step needed; the project requires Python 3.12+ from miniconda3.
+
+# Standard library
+#   tkinter (Python stdlib)
+
+# Pre-installed via miniconda3
+#   ttkbootstrap>=1.10    # modern ttk themes
+#   Pillow>=10.0          # PIL (used by ttkbootstrap icon loader)
+#   pytest>=7.0           # only for running tests/
+
+# For unit tests:
+#   pytest
