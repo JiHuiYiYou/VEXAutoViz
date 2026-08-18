@@ -343,8 +343,8 @@ class MainWindow:
     def _to_canvas(self, x: float, y: float) -> tuple[float, float]:
         """World-frame (x, y) inches → canvas pixels with view rotation+offset+scale applied."""
         θ = math.radians(self.view_rotation)
-        rx = x * math.cos(θ) - y * math.sin(θ)
-        ry = x * math.sin(θ) + y * math.cos(θ)
+        rx = x * math.cos(θ) + y * math.sin(θ)
+        ry = -x * math.sin(θ) + y * math.cos(θ)
         w = self.canvas.winfo_width()
         h = self.canvas.winfo_height()
         return (w / 2 + rx * self._scale + self.view_offset_x,
@@ -423,8 +423,8 @@ class MainWindow:
             (R*0.55,   R*0.45),    # 5 head right shoulder
         ]
         def to_screen(lx: float, ly: float) -> tuple[float, float]:
-            sx = cx + lx * math.cos(h) - ly * math.sin(h)
-            sy = cy - (lx * math.sin(h) + ly * math.cos(h))
+            sx = cx + lx * math.cos(h) + ly * math.sin(h)
+            sy = cy - lx * math.sin(h) - ly * math.cos(h)
             return (sx, sy)
         body_pts: list[float] = []
         for idx in (0, 1, 2, 3, 4, 5):

@@ -81,7 +81,11 @@ class Simulator:
             dur = self._duration_of(cmd, entry_h)
             seg = self._step(idx, cmd)
             if seg is not None:
-                seg.entry_heading = entry_h
+                if seg.kind == CommandKind.DRIVE:
+                    seg.entry_heading = _resolve_heading(
+                        cmd.args.get("heading", entry_h), entry_h)
+                else:
+                    seg.entry_heading = entry_h
                 seg.t_start = t
                 seg.t_end = t + dur
                 seg.tag = f"seg_{idx}"
