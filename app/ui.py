@@ -21,12 +21,12 @@ from .simulator import Simulator
 CANVAS_BG = "#1e1e1e"
 GRID_MAJOR = "#2e2e2e"
 START_COLOR = "#88ff88"
-START_RADIUS = 6
+START_RADIUS = 9
 HIGHLIGHT_COLOR = "#ffeb3b"
 HIGHLIGHT_WIDTH_BOOST = 3
 
-COMPASS_RADIUS = 26
-COMPASS_HIT_RADIUS = 38
+COMPASS_RADIUS = 32
+COMPASS_HIT_RADIUS = 44
 COMPASS_ANCHOR = "tr"     # top-right corner
 
 KIND_LABEL = {
@@ -166,6 +166,7 @@ class MainWindow:
         self.listbox.bind("<Down>",  lambda _e: self._select_adjacent(1))
         self.listbox.bind("<Left>",  lambda _e: self._select_adjacent(-1))
         self.listbox.bind("<Right>", lambda _e: self._select_adjacent(1))
+        self.root.bind("<space>", lambda _e: self._toggle_play())
 
         # Right: trajectory canvas
         right = ttkb.Frame(self.panes)
@@ -371,7 +372,7 @@ class MainWindow:
     def _draw_stop_dot(self, seg: TrajectorySegment, fill: str, width: int) -> None:
         x, y = seg.waypoints[0]
         cx, cy = self._to_canvas(x, y)
-        r = 5 if seg.line not in self._highlighted_lines else 8
+        r = 8 if seg.line not in self._highlighted_lines else 11
         outline = "white" if seg.line not in self._highlighted_lines else HIGHLIGHT_COLOR
         self.canvas.create_oval(cx - r, cy - r, cx + r, cy + r,
                                 fill=fill, outline=outline, width=width,
@@ -381,7 +382,7 @@ class MainWindow:
         x, y = seg.waypoints[0]
         cx, cy = self._to_canvas(x, y)
         is_hl = seg.line in self._highlighted_lines
-        r = 7 if not is_hl else 10
+        r = 11 if not is_hl else 15
         inner_r = r - 3
         outline = "white" if not is_hl else HIGHLIGHT_COLOR
         self.canvas.create_oval(cx - r, cy - r, cx + r, cy + r,
@@ -401,26 +402,45 @@ class MainWindow:
                                 tags=("start",))
 
     def _draw_robot_marker(self) -> None:
-        """5-pointed star at the playback-frame pose, pointing in heading direction."""
-        cx_w, cy_w = self._t_x, self._t_y
-        h = math.radians(self._t_h)
-        outer_r = 0.7   # inches — outer vertex radius
-        inner_r = 0.32  # inches — inner vertex radius (golden ratio ~0.382)
-        points: list[float] = []
-        # heading convention: simulator uses (sin(h), cos(h)) for north-at-0,
-        # so vertex 0 (front) is at (cx + r*sin(h), cy + r*cos(h)),
-        # then 4 more vertices stepping +72° CW from there.
-        for i in range(5):
-            angle = h + i * (2 * math.pi / 5)
-            r = outer_r if i % 2 == 0 else inner_r
-            wx = cx_w + r * math.sin(angle)
-            wy = cy_w + r * math.cos(angle)
-            cx, cy = self._to_canvas(wx, wy)
-            points.extend([cx, cy])
+        """Forward-pointing arrow marker at the playback-frame pose.
+
+        Drawn in screen space so size is constant regardless of zoom;
+        direction follows world heading + view_rotation.
+        """
+        cx, cy = self._to_canvas(self._t_x, self._t_y)
+        h = math.radians(self._t_h + self.view_rotation)
+        R = 18   # px — overall screen-space size (fixed)
+        # Local-frame polygon (forward = +y in local frame).
+        pts_local = [
+            (0.0,      R),         # 0 front tip
+            (-R*0.55,  R*0.45),    # 1 head left shoulder
+            (-R*0.50, -R*0.55),    # 2 tail left
+            (0.0,     -R*0.30),    # 3 tail center notch
+            (R*0.50,  -R*0.55),    # 4 tail right
+            (R*0.55,   R*0.45),    # 5 head right shoulder
+        ]
+        def to_screen(lx: float, ly: float) -> tuple[float, float]:
+            sx = cx + lx * math.cos(h) - ly * math.sin(h)
+            sy = cy - (lx * math.sin(h) + ly * math.cos(h))
+            return (sx, sy)
+        body_pts: list[float] = []
+        for idx in (0, 1, 2, 3, 4, 5):
+            body_pts.extend(to_screen(*pts_local[idx]))
         self.canvas.create_polygon(
-            *points, fill="#ffd54f", outline="black", width=1,
-            tags=("robot",),
-        )
+            *body_pts, fill="#ffd54f", outline="black", width=2,
+            tags=("robot",))
+        # Red front-tip triangle — distinct front so direction is unambiguous.
+        head_local = [
+            (0.0,       R * 0.92),
+            (-R * 0.32, R * 0.45),
+            (R * 0.32,  R * 0.45),
+        ]
+        head_pts: list[float] = []
+        for lx, ly in head_local:
+            head_pts.extend(to_screen(lx, ly))
+        self.canvas.create_polygon(
+            *head_pts, fill="#ff5252", outline="black", width=1,
+            tags=("robot",))
 
     def _compass_center(self, w: int, h: int) -> tuple[int, int]:
         return (w - 50, 50)
@@ -564,7 +584,11 @@ class MainWindow:
         self._render()
 
     def _select_adjacent(self, delta: int) -> str:
-        """Single-row nav: delta=-1 for prev (←/↑), +1 for next (→/↓)."""
+        """Single-row nav: delta=-1 for prev (←/↑), +1 for next (→/↓).
+
+        Also jumps the playback time to the selected segment's start so a
+        mid-playback arrow-key press "restarts" at the new segment.
+        """
         n = len(self.commands)
         if n == 0:
             return "break"
@@ -577,6 +601,11 @@ class MainWindow:
             new = sel[0] + delta
         if new < 0 or new >= n:
             return "break"
+        # Jump playback to this segment's start; _sync_slider_and_highlight
+        # below will keep the slider / label / highlight in sync.
+        segs = self.simulator._segments_cache
+        if new < len(segs):
+            self._t_current = segs[new].t_start
         self.listbox.selection_clear(0, END)
         self.listbox.selection_set(new)
         self.listbox.activate(new)
@@ -584,6 +613,7 @@ class MainWindow:
         # selection_clear + selection_set back-to-back inside one callback
         # can collapse <<ListboxSelect>> to a no-op; force the highlight refresh
         # explicitly so the canvas tracks the new selection.
+        self._sync_slider_and_highlight()
         self._on_listbox_select(None)
         return "break"
 
@@ -604,6 +634,11 @@ class MainWindow:
         line = self.highlight.line_for_segment(seg_idx)
         if line is None:
             return
+        # Jump playback time to this segment's start so a mid-playback click
+        # "restarts" at the new segment.
+        segs = self.simulator._segments_cache
+        if seg_idx < len(segs):
+            self._t_current = segs[seg_idx].t_start
         # find listbox row for this line
         for i, cmd in enumerate(self.commands):
             if cmd.line == line:

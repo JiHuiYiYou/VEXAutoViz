@@ -67,6 +67,13 @@ class Simulator:
 
     def run(self, commands: list[ChassisCommand]) -> list[TrajectorySegment]:
         self.reset()
+        # Default the heading to the first DRIVE's target heading so the robot
+        # starts already pointing along the first move (overrides settings
+        # only for this run — settings.initial_heading stays untouched).
+        if commands and commands[0].kind == CommandKind.DRIVE:
+            h_arg = commands[0].args.get("heading")
+            if h_arg is not None:
+                self.heading = _resolve_heading(h_arg, self.settings.initial_heading)
         segments: list[TrajectorySegment] = []
         t = 0.0
         for idx, cmd in enumerate(commands):
