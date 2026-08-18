@@ -105,9 +105,17 @@ class MainWindow:
         self._press_y = 0
         self._last_drag_x = 0
         self._last_drag_y = 0
+        # playback state
+        self._t_current: float = 0.0
+        self._is_playing: bool = False
+        self._play_after_id: str | None = None
+        self._t_x: float = self.settings.initial_x
+        self._t_y: float = self.settings.initial_y
+        self._t_h: float = self.settings.initial_heading
 
         self._build_toolbar()
         self._build_panes()
+        self._build_playback_bar()
         self._build_status_bar()
 
         self.canvas.bind("<Configure>", lambda _e: self._render())
@@ -117,11 +125,7 @@ class MainWindow:
         self.canvas.bind("<MouseWheel>", self._on_canvas_wheel)
 
     def _make_simulator(self) -> Simulator:
-        return Simulator(
-            initial_x=self.settings.initial_x,
-            initial_y=self.settings.initial_y,
-            initial_heading=self.settings.initial_heading,
-        )
+        return Simulator(self.settings)
 
     def _build_toolbar(self) -> None:
         bar = ttkb.Frame(self.root, padding=5)
@@ -175,6 +179,21 @@ class MainWindow:
                                  bootstyle="secondary", padding=(5, 2))
         self.status.pack(side=BOTTOM, fill=X)
 
+    def _build_playback_bar(self) -> None:
+        bar = ttkb.Frame(self.root, padding=(5, 2))
+        bar.pack(side=BOTTOM, fill=X)
+        self.play_btn = ttkb.Button(bar, text="▶", width=3,
+                                    command=self._toggle_play, bootstyle="secondary")
+        self.play_btn.pack(side=LEFT)
+        self.time_label = ttkb.Label(bar, text="0.00 / 0.00s", width=14, anchor="w",
+                                     bootstyle="secondary")
+        self.time_label.pack(side=LEFT, padx=(5, 5))
+        self.t_slider = ttkb.Scale(bar, from_=0, to=1, value=0,
+                                   command=self._on_slider_change)
+        self.t_slider.pack(side=LEFT, fill=X, expand=True)
+        ttkb.Button(bar, text="⟲", width=3, command=self._reset_playback,
+                    bootstyle="secondary").pack(side=LEFT, padx=(5, 0))
+
     def open_file(self) -> None:
         path = filedialog.askopenfilename(
             title="选择 Auto.cpp",
@@ -196,6 +215,7 @@ class MainWindow:
         self.view_offset_x = 0.0
         self.view_offset_y = 0.0
         self._auto_scale = True
+        self._reset_playback()
         self._render()
 
     def open_settings(self) -> None:
@@ -211,6 +231,7 @@ class MainWindow:
             self.highlight = HighlightMap(self.commands, self.segments)
         self._highlighted_lines.clear()
         self.listbox.selection_clear(0, END)
+        self._reset_playback()
         self._render()
         self._set_status("设置已应用")
 
@@ -233,6 +254,7 @@ class MainWindow:
         self.view_offset_x = 0.0
         self.view_offset_y = 0.0
         self._auto_scale = True
+        self._reset_playback()
 
         self._populate_listbox()
         self._render()
@@ -252,11 +274,15 @@ class MainWindow:
             return
 
         self._autoscale(w, h)
+        # Cache the playback-frame pose so the marker is drawn from current time,
+        # not from the simulator's final state.
+        self._t_x, self._t_y, self._t_h = self.simulator.pose_at(self._t_current)
         self._draw_grid(w, h)
 
         for seg in self.segments:
             self._draw_segment(seg)
         self._draw_start_marker()
+        self._draw_robot_marker()
         self._draw_compass(w, h)
 
     def _draw_grid(self, w: int, h: int) -> None:
@@ -373,6 +399,28 @@ class MainWindow:
         self.canvas.create_text(cx, cy + START_RADIUS + 12, text="起点",
                                 fill=START_COLOR, font=("Arial", 9),
                                 tags=("start",))
+
+    def _draw_robot_marker(self) -> None:
+        """5-pointed star at the playback-frame pose, pointing in heading direction."""
+        cx_w, cy_w = self._t_x, self._t_y
+        h = math.radians(self._t_h)
+        outer_r = 0.7   # inches — outer vertex radius
+        inner_r = 0.32  # inches — inner vertex radius (golden ratio ~0.382)
+        points: list[float] = []
+        # heading convention: simulator uses (sin(h), cos(h)) for north-at-0,
+        # so vertex 0 (front) is at (cx + r*sin(h), cy + r*cos(h)),
+        # then 4 more vertices stepping +72° CW from there.
+        for i in range(5):
+            angle = h + i * (2 * math.pi / 5)
+            r = outer_r if i % 2 == 0 else inner_r
+            wx = cx_w + r * math.sin(angle)
+            wy = cy_w + r * math.cos(angle)
+            cx, cy = self._to_canvas(wx, wy)
+            points.extend([cx, cy])
+        self.canvas.create_polygon(
+            *points, fill="#ffd54f", outline="black", width=1,
+            tags=("robot",),
+        )
 
     def _compass_center(self, w: int, h: int) -> tuple[int, int]:
         return (w - 50, 50)
@@ -567,6 +615,60 @@ class MainWindow:
                 self._render()
                 return
 
+    # ---- playback ----
+
+    def _toggle_play(self) -> None:
+        self._is_playing = not self._is_playing
+        self.play_btn.configure(text="⏸" if self._is_playing else "▶")
+        if self._is_playing:
+            self._tick()
+
+    def _tick(self) -> None:
+        if not self._is_playing:
+            return
+        dt = 0.033  # ~30 fps
+        self._t_current = min(self.simulator.total_duration,
+                              self._t_current + dt)
+        self._sync_slider_and_highlight()
+        if self._t_current >= self.simulator.total_duration:
+            self._is_playing = False
+            self.play_btn.configure(text="▶")
+            return
+        self._play_after_id = self.root.after(33, self._tick)
+
+    def _reset_playback(self) -> None:
+        self._is_playing = False
+        self.play_btn.configure(text="▶")
+        if self._play_after_id is not None:
+            self.root.after_cancel(self._play_after_id)
+            self._play_after_id = None
+        self._t_current = 0.0
+        self._sync_slider_and_highlight()
+
+    def _on_slider_change(self, value: str) -> str:
+        # Programmatic configure() doesn't fire this; user drags only.
+        if self._is_playing:
+            return ""
+        try:
+            self._t_current = float(value)
+        except ValueError:
+            return ""
+        self._sync_slider_and_highlight()
+        return ""
+
+    def _sync_slider_and_highlight(self) -> None:
+        total = self.simulator.total_duration
+        # Slider value clamping (Tk Scale accepts the float directly).
+        self.t_slider.configure(value=self._t_current, to=max(total, 1e-9))
+        self.time_label.configure(
+            text=f"{self._t_current:.2f} / {total:.2f}s")
+        line = self.simulator.line_at(self._t_current)
+        if line is not None:
+            self._highlighted_lines = {line}
+        else:
+            self._highlighted_lines.clear()
+        self._render()
+
     def _set_status(self, msg: str) -> None:
         self.status.configure(text=msg)
 
@@ -600,6 +702,9 @@ class SettingsDialog:
             ("pixels_per_inch",    "缩放 (px/in, 0=自动)", settings.pixels_per_inch),
             ("track_width",        "底盘轮距 (in)",        settings.track_width),
             ("wheel_diameter",     "轮胎直径 (in)",        settings.wheel_diameter),
+            ("linear_speed_in_s",  "直行速度 (in/s)",      settings.linear_speed_in_s),
+            ("angular_speed_deg_s","转向速度 (°/s)",       settings.angular_speed_deg_s),
+            ("stop_hold_seconds",  "STOP 停留 (s)",        settings.stop_hold_seconds),
         ]
         for i, (key, label, value) in enumerate(rows):
             ttkb.Label(frame, text=label).grid(row=i, column=0, sticky="w", pady=2)

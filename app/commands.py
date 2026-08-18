@@ -32,3 +32,6 @@ class TrajectorySegment:
     arrow_heading: float | None = None
     stop_mode: str | None = None
     tag: str = ""
+    t_start: float = 0.0
+    t_end: float = 0.0
+    entry_heading: float = 0.0

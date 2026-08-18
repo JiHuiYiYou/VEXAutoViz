@@ -22,6 +22,9 @@ class Settings:
     track_width: float = 12.0        # inches — hook for future arc turns
     wheel_diameter: float = 3.25     # inches — for future arc/dist computations
     view_rotation: float = 0.0       # degrees — rotate the world view CCW
+    linear_speed_in_s: float = 24.0  # playback linear speed (inches / second)
+    angular_speed_deg_s: float = 90.0  # playback angular speed (degrees / second)
+    stop_hold_seconds: float = 0.5   # visual hold time for STOP segments
 
     def reset_to_defaults(self) -> None:
         for f in fields(self):
