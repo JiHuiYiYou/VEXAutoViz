@@ -162,10 +162,13 @@ class MainWindow:
         )
         self.listbox.pack(fill=BOTH, expand=True)
         self.listbox.bind("<<ListboxSelect>>", self._on_listbox_select)
-        self.listbox.bind("<Up>",    lambda _e: self._select_adjacent(-1))
-        self.listbox.bind("<Down>",  lambda _e: self._select_adjacent(1))
-        self.listbox.bind("<Left>",  lambda _e: self._select_adjacent(-1))
-        self.listbox.bind("<Right>", lambda _e: self._select_adjacent(1))
+        # Bind arrow keys to root so they work regardless of focus (canvas,
+        # toolbar, etc.). _select_adjacent returns "break" to suppress the
+        # Tk Listbox's default Up/Down multi-select / anchor behavior.
+        self.root.bind("<Up>",    lambda _e: self._select_adjacent(-1))
+        self.root.bind("<Down>",  lambda _e: self._select_adjacent(1))
+        self.root.bind("<Left>",  lambda _e: self._select_adjacent(-1))
+        self.root.bind("<Right>", lambda _e: self._select_adjacent(1))
         self.root.bind("<space>", lambda _e: self._toggle_play())
 
         # Right: trajectory canvas
