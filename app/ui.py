@@ -158,6 +158,10 @@ class MainWindow:
         )
         self.listbox.pack(fill=BOTH, expand=True)
         self.listbox.bind("<<ListboxSelect>>", self._on_listbox_select)
+        self.listbox.bind("<Up>",    lambda _e: self._select_adjacent(-1))
+        self.listbox.bind("<Down>",  lambda _e: self._select_adjacent(1))
+        self.listbox.bind("<Left>",  lambda _e: self._select_adjacent(-1))
+        self.listbox.bind("<Right>", lambda _e: self._select_adjacent(1))
 
         # Right: trajectory canvas
         right = ttkb.Frame(self.panes)
@@ -256,20 +260,34 @@ class MainWindow:
         self._draw_compass(w, h)
 
     def _draw_grid(self, w: int, h: int) -> None:
-        step = 12
-        for x_in in range(-200, 200, step):
-            cx, _ = self._to_canvas(x_in, 0)
-            self.canvas.create_line(cx, 0, cx, h, fill=GRID_MAJOR, tags=("grid",))
-        for y_in in range(-200, 200, step):
-            _, cy = self._to_canvas(0, y_in)
-            self.canvas.create_line(0, cy, w, cy, fill=GRID_MAJOR, tags=("grid",))
+        step_px = 12 * self._scale
+        if step_px < 6:
+            return
+        # Screen-space grid: lines stay axis-aligned regardless of view rotation.
+        # Anchor the grid to world (0,0) so the "axes through origin" still line up.
+        origin_x = w / 2 + self.view_offset_x
+        origin_y = h / 2 + self.view_offset_y
+        # First line to the left/top of origin, step back until off-screen.
+        x = origin_x
+        while x > 0:
+            x -= step_px
+        while x < w:
+            xi = int(round(x))
+            self.canvas.create_line(xi, 0, xi, h, fill=GRID_MAJOR, tags=("grid",))
+            x += step_px
+        y = origin_y
+        while y > 0:
+            y -= step_px
+        while y < h:
+            yi = int(round(y))
+            self.canvas.create_line(0, yi, w, yi, fill=GRID_MAJOR, tags=("grid",))
+            y += step_px
         # axes through the origin
-        ax_x0, ax_x1 = self._to_canvas(-200, 0), self._to_canvas(200, 0)
-        ax_y0, ax_y1 = self._to_canvas(0, -200), self._to_canvas(0, 200)
-        self.canvas.create_line(ax_x0[0], ax_x0[1], ax_x1[0], ax_x1[1],
-                                fill="#444", tags=("grid",))
-        self.canvas.create_line(ax_y0[0], ax_y0[1], ax_y1[0], ax_y1[1],
-                                fill="#444", tags=("grid",))
+        ax_color = "#444"
+        self.canvas.create_line(0, origin_y, w, origin_y,
+                                fill=ax_color, tags=("grid",))
+        self.canvas.create_line(origin_x, 0, origin_x, h,
+                                fill=ax_color, tags=("grid",))
 
     def _autoscale(self, w: int, h: int) -> None:
         if not self._auto_scale:
@@ -316,10 +334,11 @@ class MainWindow:
             cx0, cy0 = self._to_canvas(x0, y0)
             cx1, cy1 = self._to_canvas(x1, y1)
             self.canvas.create_line(cx0, cy0, cx1, cy1,
-                                    fill=fill, width=width,
+                                    fill=fill, width=width, arrow="last",
+                                    arrowshape=(10, 12, 3),
                                     tags=("drive", seg.tag))
-        elif seg.kind in (CommandKind.TURN, CommandKind.TURN_LR) and seg.arrow_heading is not None:
-            self._draw_turn_wedge(seg, fill, width)
+        elif seg.kind in (CommandKind.TURN, CommandKind.TURN_LR):
+            self._draw_turn_dot(seg, fill, width)
         elif seg.kind == CommandKind.STOP:
             self._draw_stop_dot(seg, fill, width)
 
@@ -332,25 +351,19 @@ class MainWindow:
                                 fill=fill, outline=outline, width=width,
                                 tags=("stop", seg.tag))
 
-    def _draw_turn_wedge(self, seg: TrajectorySegment, fill: str, width: int) -> None:
+    def _draw_turn_dot(self, seg: TrajectorySegment, fill: str, width: int) -> None:
         x, y = seg.waypoints[0]
-        h = math.radians(seg.arrow_heading)
-        length = 8.0           # inches
-        half_w = 0.35 * length  # half-width of arrowhead base
-        # Build tip / base points in world coords (relative to anchor),
-        # then route through _to_canvas so the rotation is applied consistently.
-        tip_wx, tip_wy = x + length * math.sin(h),  y + length * math.cos(h)
-        base1_wx, base1_wy = x + half_w * math.cos(h), y - half_w * math.sin(h)
-        base2_wx, base2_wy = x - half_w * math.cos(h), y + half_w * math.sin(h)
-        tip_x, tip_y = self._to_canvas(tip_wx, tip_wy)
-        b1_x, b1_y = self._to_canvas(base1_wx, base1_wy)
-        b2_x, b2_y = self._to_canvas(base2_wx, base2_wy)
-        self.canvas.create_polygon(
-            tip_x, tip_y, b1_x, b1_y, b2_x, b2_y,
-            fill=fill, outline=HIGHLIGHT_COLOR if seg.line in self._highlighted_lines else "",
-            width=width,
-            tags=("turn", seg.tag),
-        )
+        cx, cy = self._to_canvas(x, y)
+        is_hl = seg.line in self._highlighted_lines
+        r = 7 if not is_hl else 10
+        inner_r = r - 3
+        outline = "white" if not is_hl else HIGHLIGHT_COLOR
+        self.canvas.create_oval(cx - r, cy - r, cx + r, cy + r,
+                                fill=fill, outline=outline, width=width,
+                                tags=("turn", seg.tag))
+        self.canvas.create_oval(cx - inner_r, cy - inner_r, cx + inner_r, cy + inner_r,
+                                fill=CANVAS_BG, outline="",
+                                tags=("turn", seg.tag))
 
     def _draw_start_marker(self) -> None:
         cx, cy = self._to_canvas(0, 0)
@@ -447,6 +460,7 @@ class MainWindow:
         if not self._pan_active and (total_dx ** 2 + total_dy ** 2 > 25):
             self._pan_active = True
             self._pending_click = False
+            self._auto_scale = False
         if self._pan_active:
             self.view_offset_x += event.x - self._last_drag_x
             self.view_offset_y += event.y - self._last_drag_y
@@ -500,6 +514,26 @@ class MainWindow:
         lines = {self.commands[i].line for i in sel}
         self._highlighted_lines = lines
         self._render()
+
+    def _select_adjacent(self, delta: int) -> str:
+        """Single-row nav: delta=-1 for prev (←/↑), +1 for next (→/↓)."""
+        n = len(self.commands)
+        if n == 0:
+            return "break"
+        sel = self.listbox.curselection()
+        if not sel:
+            if delta < 0:
+                return "break"
+            new = 0
+        else:
+            new = sel[0] + delta
+        if new < 0 or new >= n:
+            return "break"
+        self.listbox.selection_clear(0, END)
+        self.listbox.selection_set(new)
+        self.listbox.activate(new)
+        self.listbox.see(new)
+        return "break"
 
     def _on_canvas_click(self, event: Any) -> None:
         # find_closest returns nearest item including grid; find closest seg-tagged item
