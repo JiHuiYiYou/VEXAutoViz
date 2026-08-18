@@ -557,8 +557,21 @@ class MainWindow:
                                        self.canvas.winfo_height())
         dx = event.x - cx
         dy = event.y - cy
+        # Capture the world point currently at the visual center so we can
+        # keep it fixed when the view rotates (no swing if (0,0) is far away).
+        θ_old = math.radians(self.view_rotation)
+        rx_c = -self.view_offset_x / self._scale
+        ry_c = self.view_offset_y / self._scale
+        cx_w = rx_c * math.cos(θ_old) - ry_c * math.sin(θ_old)
+        cy_w = rx_c * math.sin(θ_old) + ry_c * math.cos(θ_old)
         # angle CW from screen-up, in degrees
         self.view_rotation = math.degrees(math.atan2(dx, -dy))
+        # Recompute offset so the same world point stays at the visual center.
+        θ_new = math.radians(self.view_rotation)
+        rx_n = cx_w * math.cos(θ_new) + cy_w * math.sin(θ_new)
+        ry_n = -cx_w * math.sin(θ_new) + cy_w * math.cos(θ_new)
+        self.view_offset_x = -rx_n * self._scale
+        self.view_offset_y = ry_n * self._scale
         self._render()
 
     def _on_canvas_wheel(self, event: Any) -> None:
