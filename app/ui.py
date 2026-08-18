@@ -424,7 +424,7 @@ class MainWindow:
         ]
         def to_screen(lx: float, ly: float) -> tuple[float, float]:
             sx = cx + lx * math.cos(h) + ly * math.sin(h)
-            sy = cy - lx * math.sin(h) - ly * math.cos(h)
+            sy = cy + lx * math.sin(h) - ly * math.cos(h)
             return (sx, sy)
         body_pts: list[float] = []
         for idx in (0, 1, 2, 3, 4, 5):
