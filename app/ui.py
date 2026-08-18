@@ -533,6 +533,10 @@ class MainWindow:
         self.listbox.selection_set(new)
         self.listbox.activate(new)
         self.listbox.see(new)
+        # selection_clear + selection_set back-to-back inside one callback
+        # can collapse <<ListboxSelect>> to a no-op; force the highlight refresh
+        # explicitly so the canvas tracks the new selection.
+        self._on_listbox_select(None)
         return "break"
 
     def _on_canvas_click(self, event: Any) -> None:
