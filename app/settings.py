@@ -21,6 +21,7 @@ class Settings:
     pixels_per_inch: float = 0.0     # 0 = auto-fit to trajectory extent
     track_width: float = 12.0        # inches — hook for future arc turns
     wheel_diameter: float = 3.25     # inches — for future arc/dist computations
+    view_rotation: float = 0.0       # degrees — rotate the world view CCW
 
     def reset_to_defaults(self) -> None:
         for f in fields(self):

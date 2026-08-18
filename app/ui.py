@@ -25,6 +25,10 @@ START_RADIUS = 6
 HIGHLIGHT_COLOR = "#ffeb3b"
 HIGHLIGHT_WIDTH_BOOST = 3
 
+COMPASS_RADIUS = 26
+COMPASS_HIT_RADIUS = 38
+COMPASS_ANCHOR = "tr"     # top-right corner
+
 KIND_LABEL = {
     CommandKind.DRIVE: "drive  ",
     CommandKind.TURN: "turn   ",
@@ -90,12 +94,18 @@ class MainWindow:
         self.current_path: str | None = None
         self._scale = self.settings.pixels_per_inch or 3.0
         self._highlighted_lines: set[int] = set()
+        self.view_rotation: float = self.settings.view_rotation
+        self._dragging_compass = False
+        self._pending_click = False
 
         self._build_toolbar()
         self._build_panes()
         self._build_status_bar()
 
         self.canvas.bind("<Configure>", lambda _e: self._render())
+        self.canvas.bind("<ButtonPress-1>", self._on_canvas_press)
+        self.canvas.bind("<B1-Motion>", self._on_canvas_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_canvas_release)
 
     def _make_simulator(self) -> Simulator:
         return Simulator(
@@ -146,7 +156,6 @@ class MainWindow:
 
         self.canvas = tk.Canvas(right, background=CANVAS_BG, highlightthickness=0)
         self.canvas.pack(fill=BOTH, expand=True)
-        self.canvas.bind("<Button-1>", self._on_canvas_click)
 
     def _build_status_bar(self) -> None:
         self.status = ttkb.Label(self.root, text="就绪", anchor="w",
@@ -170,6 +179,7 @@ class MainWindow:
     def reset_view(self) -> None:
         self._highlighted_lines.clear()
         self.listbox.selection_clear(0, END)
+        self.view_rotation = 0.0
         self._render()
 
     def open_settings(self) -> None:
@@ -178,6 +188,7 @@ class MainWindow:
     def _apply_settings(self, new_settings: Settings) -> None:
         self.settings = new_settings
         save_settings(new_settings)
+        self.view_rotation = new_settings.view_rotation
         self.simulator = self._make_simulator()
         if self.commands:
             self.segments = self.simulator.run(self.commands)
@@ -221,23 +232,29 @@ class MainWindow:
         if w < 50 or h < 50:
             return
 
-        self._draw_grid(w, h)
         self._autoscale(w, h)
+        self._draw_grid(w, h)
 
         for seg in self.segments:
             self._draw_segment(seg)
         self._draw_start_marker()
+        self._draw_compass(w, h)
 
     def _draw_grid(self, w: int, h: int) -> None:
         step = 12
         for x_in in range(-200, 200, step):
-            x = w / 2 + x_in * self._scale
-            self.canvas.create_line(x, 0, x, h, fill=GRID_MAJOR, tags=("grid",))
+            cx, _ = self._to_canvas(x_in, 0)
+            self.canvas.create_line(cx, 0, cx, h, fill=GRID_MAJOR, tags=("grid",))
         for y_in in range(-200, 200, step):
-            y = h / 2 - y_in * self._scale
-            self.canvas.create_line(0, y, w, y, fill=GRID_MAJOR, tags=("grid",))
-        self.canvas.create_line(0, h / 2, w, h / 2, fill="#444", tags=("grid",))
-        self.canvas.create_line(w / 2, 0, w / 2, h, fill="#444", tags=("grid",))
+            _, cy = self._to_canvas(0, y_in)
+            self.canvas.create_line(0, cy, w, cy, fill=GRID_MAJOR, tags=("grid",))
+        # axes through the origin
+        ax_x0, ax_x1 = self._to_canvas(-200, 0), self._to_canvas(200, 0)
+        ax_y0, ax_y1 = self._to_canvas(0, -200), self._to_canvas(0, 200)
+        self.canvas.create_line(ax_x0[0], ax_x0[1], ax_x1[0], ax_x1[1],
+                                fill="#444", tags=("grid",))
+        self.canvas.create_line(ax_y0[0], ax_y0[1], ax_y1[0], ax_y1[1],
+                                fill="#444", tags=("grid",))
 
     def _autoscale(self, w: int, h: int) -> None:
         if self.settings.pixels_per_inch > 0:
@@ -255,9 +272,13 @@ class MainWindow:
         self._scale = min(8.0, max(1.0, usable / max_abs))
 
     def _to_canvas(self, x: float, y: float) -> tuple[float, float]:
+        """World-frame (x, y) inches → canvas pixels with view rotation applied."""
+        θ = math.radians(self.view_rotation)
+        rx = x * math.cos(θ) - y * math.sin(θ)
+        ry = x * math.sin(θ) + y * math.cos(θ)
         w = self.canvas.winfo_width()
         h = self.canvas.winfo_height()
-        return (w / 2 + x * self._scale, h / 2 - y * self._scale)
+        return (w / 2 + rx * self._scale, h / 2 - ry * self._scale)
 
     def _draw_segment(self, seg: TrajectorySegment) -> None:
         is_hl = seg.line in self._highlighted_lines
@@ -291,18 +312,19 @@ class MainWindow:
 
     def _draw_turn_wedge(self, seg: TrajectorySegment, fill: str, width: int) -> None:
         x, y = seg.waypoints[0]
-        cx, cy = self._to_canvas(x, y)
-        length = 8 * self._scale
-        half_w = 0.35 * length
         h = math.radians(seg.arrow_heading)
-        tip_x = cx + length * math.sin(h)
-        tip_y = cy - length * math.cos(h)
-        base1_x = cx + half_w * math.cos(h)
-        base1_y = cy + half_w * math.sin(h)
-        base2_x = cx - half_w * math.cos(h)
-        base2_y = cy - half_w * math.sin(h)
+        length = 8.0           # inches
+        half_w = 0.35 * length  # half-width of arrowhead base
+        # Build tip / base points in world coords (relative to anchor),
+        # then route through _to_canvas so the rotation is applied consistently.
+        tip_wx, tip_wy = x + length * math.sin(h),  y + length * math.cos(h)
+        base1_wx, base1_wy = x + half_w * math.cos(h), y - half_w * math.sin(h)
+        base2_wx, base2_wy = x - half_w * math.cos(h), y + half_w * math.sin(h)
+        tip_x, tip_y = self._to_canvas(tip_wx, tip_wy)
+        b1_x, b1_y = self._to_canvas(base1_wx, base1_wy)
+        b2_x, b2_y = self._to_canvas(base2_wx, base2_wy)
         self.canvas.create_polygon(
-            tip_x, tip_y, base1_x, base1_y, base2_x, base2_y,
+            tip_x, tip_y, b1_x, b1_y, b2_x, b2_y,
             fill=fill, outline=HIGHLIGHT_COLOR if seg.line in self._highlighted_lines else "",
             width=width,
             tags=("turn", seg.tag),
@@ -317,7 +339,108 @@ class MainWindow:
                                 fill=START_COLOR, font=("Arial", 9),
                                 tags=("start",))
 
+    def _compass_center(self, w: int, h: int) -> tuple[int, int]:
+        return (w - 50, 50)
+
+    def _is_in_compass(self, x: int, y: int) -> bool:
+        w = self.canvas.winfo_width()
+        h = self.canvas.winfo_height()
+        if w < 100 or h < 100:
+            return False
+        cx, cy = self._compass_center(w, h)
+        return (x - cx) ** 2 + (y - cy) ** 2 <= COMPASS_HIT_RADIUS ** 2
+
+    def _draw_compass(self, w: int, h: int) -> None:
+        if w < 100 or h < 100:
+            return
+        cx, cy = self._compass_center(w, h)
+        r = COMPASS_RADIUS
+
+        # Background circle
+        bg = "#2a2a2a" if not self._dragging_compass else "#3a3a3a"
+        self.canvas.create_oval(cx - r - 4, cy - r - 4, cx + r + 4, cy + r + 4,
+                                fill=bg, outline="#666", width=1,
+                                tags=("compass",))
+        # Outer ring
+        self.canvas.create_oval(cx - r, cy - r, cx + r, cy + r,
+                                fill="", outline="#555", width=1,
+                                tags=("compass",))
+
+        # Compute screen direction of world Y (north) and world X (east).
+        θ = math.radians(self.view_rotation)
+        # World-Y tip in screen: at angle θ CW from up.
+        # World-X tip in screen: at angle (θ + 90) CW from up.
+        n_tip_x = cx + r * math.sin(θ)
+        n_tip_y = cy - r * math.cos(θ)
+        e_tip_x = cx + r * math.cos(θ)
+        e_tip_y = cy + r * math.sin(θ)
+
+        # East axis (red, X)
+        self.canvas.create_line(cx, cy, e_tip_x, e_tip_y,
+                                fill="#ff5252", width=2, arrow="last",
+                                arrowshape=(8, 10, 4),
+                                tags=("compass",))
+        # North axis (green, Y)
+        self.canvas.create_line(cx, cy, n_tip_x, n_tip_y,
+                                fill="#5bd0ce", width=2, arrow="last",
+                                arrowshape=(8, 10, 4),
+                                tags=("compass",))
+        # Center dot
+        self.canvas.create_oval(cx - 2, cy - 2, cx + 2, cy + 2,
+                                fill="#cccccc", outline="", tags=("compass",))
+        # Labels at tips
+        lbl_offset = 4
+        self.canvas.create_text(e_tip_x + lbl_offset, e_tip_y + lbl_offset,
+                                text="E", fill="#ff5252", font=("Arial", 8, "bold"),
+                                tags=("compass",))
+        self.canvas.create_text(n_tip_x, n_tip_y - lbl_offset * 2,
+                                text="N", fill="#5bd0ce", font=("Arial", 8, "bold"),
+                                tags=("compass",))
+        # Rotation value below
+        self.canvas.create_text(cx, cy + r + 14,
+                                text=f"{self.view_rotation:+.0f}°  拖动旋转",
+                                fill="#aaaaaa", font=("Arial", 8),
+                                tags=("compass",))
+
     # ---- click handlers ----
+
+    def _on_canvas_press(self, event: Any) -> None:
+        if self._is_in_compass(event.x, event.y):
+            self._dragging_compass = True
+            self._update_rotation_from_event(event)
+        else:
+            self._press_x = event.x
+            self._press_y = event.y
+            self._pending_click = True
+
+    def _on_canvas_drag(self, event: Any) -> None:
+        if self._dragging_compass:
+            self._update_rotation_from_event(event)
+            return
+        if self._pending_click:
+            if (event.x - self._press_x) ** 2 + (event.y - self._press_y) ** 2 > 25:
+                self._pending_click = False
+
+    def _on_canvas_release(self, event: Any) -> None:
+        if self._dragging_compass:
+            self._dragging_compass = False
+            # Persist the new rotation so it survives restarts.
+            self.settings.view_rotation = self.view_rotation
+            save_settings(self.settings)
+            self._render()
+            return
+        if self._pending_click:
+            self._on_canvas_click(event)
+        self._pending_click = False
+
+    def _update_rotation_from_event(self, event: Any) -> None:
+        cx, cy = self._compass_center(self.canvas.winfo_width(),
+                                       self.canvas.winfo_height())
+        dx = event.x - cx
+        dy = event.y - cy
+        # angle CW from screen-up, in degrees
+        self.view_rotation = math.degrees(math.atan2(dx, -dy))
+        self._render()
 
     def _on_listbox_select(self, _event: Any) -> None:
         sel = self.listbox.curselection()
