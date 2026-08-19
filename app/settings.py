@@ -26,6 +26,16 @@ class Settings:
     angular_speed_deg_s: float = 90.0  # playback angular speed (degrees / second)
     stop_hold_seconds: float = 0.5   # visual hold time for STOP segments
     hide_voltage_threshold: float = 2.5  # V — DRIVE 电压 ≤ 此值在右键批量隐藏时视为顶桩
+    # Custom background image (typically a top-down field photo). The image
+    # is anchored in world coordinates: origin is the image center, scale
+    # is inches per image pixel. Empty path = no background.
+    background_image_path: str = ""
+    background_origin_x: float = 0.0
+    background_origin_y: float = 0.0
+    background_scale: float = 0.1      # inches per image pixel
+    background_rotation: float = 0.0   # degrees, CW
+    background_opacity: float = 0.5
+    background_visible: bool = True
 
     def reset_to_defaults(self) -> None:
         for f in fields(self):

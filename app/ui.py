@@ -11,6 +11,8 @@ from ttkbootstrap.constants import (
     BOTH, BOTTOM, END, HORIZONTAL, LEFT, RIGHT, TOP, X, Y,
 )
 
+from .background import BackgroundManager
+from .background_dialog import BackgroundDialog
 from .commands import ChassisCommand, CommandKind, TrajectorySegment
 from .detail_panel import DetailPanel
 from .highlight import HighlightMap
@@ -89,6 +91,7 @@ class MainWindow:
         self.parser = CppParser()
         self.settings: Settings = load_settings()
         self.simulator = self._make_simulator()
+        self.background = BackgroundManager(self.settings)
         self.commands: list[ChassisCommand] = []
         self.segments: list[TrajectorySegment] = []
         self.highlight = HighlightMap([], [])
@@ -141,6 +144,8 @@ class MainWindow:
         ttkb.Button(bar, text="重新加载", command=self.reload,
                     bootstyle="secondary").pack(side=LEFT, padx=(0, 5))
         ttkb.Button(bar, text="设置", command=self.open_settings,
+                    bootstyle="secondary").pack(side=LEFT, padx=(0, 5))
+        ttkb.Button(bar, text="背景", command=self.open_background,
                     bootstyle="secondary").pack(side=LEFT, padx=(0, 5))
         ttkb.Button(bar, text="复位视角", command=self.reset_view,
                     bootstyle="secondary").pack(side=LEFT, padx=(0, 5))
@@ -246,11 +251,15 @@ class MainWindow:
     def open_settings(self) -> None:
         SettingsDialog(self.root, self.settings, on_apply=self._apply_settings)
 
+    def open_background(self) -> None:
+        BackgroundDialog(self.root, self.settings, on_apply=self._apply_settings)
+
     def _apply_settings(self, new_settings: Settings) -> None:
         self.settings = new_settings
         save_settings(new_settings)
         self.view_rotation = new_settings.view_rotation
         self.simulator = self._make_simulator()
+        self.background = BackgroundManager(new_settings)
         if self.commands:
             self.segments = self.simulator.run(self.commands)
             self.highlight = HighlightMap(self.commands, self.segments)
@@ -319,6 +328,8 @@ class MainWindow:
         # not from the simulator's final state.
         self._t_x, self._t_y, self._t_h = self.simulator.pose_at(self._t_current)
         self._draw_grid(w, h)
+        # Background image sits above the grid, below the trajectory.
+        self.background.draw(self.canvas, self._to_canvas, self._scale)
 
         for seg in self.segments:
             self._draw_segment(seg)
