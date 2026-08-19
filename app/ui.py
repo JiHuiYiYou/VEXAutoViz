@@ -821,7 +821,8 @@ class SettingsDialog:
 
         self.win = ttkb.Toplevel(parent)
         self.win.title("设置")
-        self.win.geometry("320x310")
+        self.win.geometry("360x460")
+        self.win.minsize(320, 460)
         self.win.transient(parent)
         self.win.grab_set()
 
