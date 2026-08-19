@@ -821,10 +821,12 @@ class SettingsDialog:
 
         self.win = ttkb.Toplevel(parent)
         self.win.title("设置")
-        self.win.geometry("360x460")
-        self.win.minsize(320, 460)
+        self.win.resizable(False, False)
         self.win.transient(parent)
         self.win.grab_set()
+        # Make the window visible immediately so winfo_reqheight reflects the
+        # real layout (withdrawn windows report 1x1).
+        self.win.deiconify()
 
         frame = ttkb.Frame(self.win, padding=15)
         frame.pack(fill=BOTH, expand=True)
@@ -847,11 +849,11 @@ class SettingsDialog:
             self._vars[key] = var
             entry = ttkb.Entry(frame, textvariable=var, width=12)
             entry.grid(row=i, column=1, sticky="e", pady=2)
-            # Pressing Enter in any field applies (mirrors typical dialogs
-            # where Enter = OK and avoids the user typing a value and
-            # forgetting to click the Apply button).
             entry.bind("<Return>", lambda _e: self._apply())
 
+        # Button bar — placed BEFORE pack, so geometry() below can measure
+        # the actual height. We compute the dialog height from content
+        # rather than guessing.
         btn_bar = ttkb.Frame(self.win, padding=(15, 0, 15, 15))
         btn_bar.pack(fill=X)
         ttkb.Button(btn_bar, text="默认", command=self._restore_defaults,
@@ -860,6 +862,22 @@ class SettingsDialog:
                     bootstyle="secondary").pack(side=RIGHT, padx=(5, 0))
         ttkb.Button(btn_bar, text="应用", command=self._apply,
                     bootstyle="primary").pack(side=RIGHT)
+
+        # Force geometry calculation then auto-fit to content height so the
+        # button bar is always visible regardless of theme / font metrics.
+        self.win.update_idletasks()
+        req_w = self.win.winfo_reqwidth()
+        req_h = self.win.winfo_reqheight()
+        self.win.geometry(f"{max(req_w, 360)}x{req_h}")
+        # Center on parent
+        self.win.update_idletasks()
+        px = parent.winfo_rootx()
+        py = parent.winfo_rooty()
+        pw = parent.winfo_width()
+        ph = parent.winfo_height()
+        w = self.win.winfo_width()
+        h = self.win.winfo_height()
+        self.win.geometry(f"+{px + (pw - w) // 2}+{py + (ph - h) // 2}")
 
     def _restore_defaults(self) -> None:
         s = Settings()
