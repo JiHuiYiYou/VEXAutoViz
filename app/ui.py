@@ -12,6 +12,7 @@ from ttkbootstrap.constants import (
 )
 
 from .commands import ChassisCommand, CommandKind, TrajectorySegment
+from .detail_panel import DetailPanel
 from .highlight import HighlightMap
 from .parser import CppParser
 from .settings import Settings, load_settings, save_settings
@@ -176,6 +177,17 @@ class MainWindow:
         self.root.bind("<Right>", lambda _e: self._select_adjacent(1))
         self.root.bind("<space>", lambda _e: self._toggle_play())
 
+        # Middle: detail panel (selected command's args + raw + context)
+        middle = ttkb.Frame(self.panes)
+        self.panes.add(middle, weight=3)
+        self.detail = DetailPanel(
+            middle,
+            on_dirty=self._on_detail_dirty,
+            on_save=self._on_detail_saved,
+            on_discard=self._on_detail_discarded,
+        )
+        self.detail.pack(fill=BOTH, expand=True)
+
         # Right: trajectory canvas
         right = ttkb.Frame(self.panes)
         self.panes.add(right, weight=3)
@@ -271,6 +283,16 @@ class MainWindow:
         self._reset_playback()
 
         self._populate_listbox()
+        # Detail panel: feed file lines + per-line command index.
+        file_lines = content.split("\n")
+        # Drop the trailing empty string that comes from a trailing "\n",
+        # so 1-based line numbers match what the parser emitted.
+        if file_lines and file_lines[-1] == "":
+            file_lines = file_lines[:-1]
+        commands_by_line = {c.line: c for c in self.commands}
+        self.detail.set_file(path, file_lines, commands_by_line)
+        self.detail.show(self.commands[0] if self.commands else None)
+
         self._render()
         self._update_pose_status()
 
@@ -609,10 +631,35 @@ class MainWindow:
     def _on_listbox_select(self, _event: Any) -> None:
         sel = self.listbox.curselection()
         if not sel:
+            self.detail.show(None)
             return
         lines = {self.commands[i].line for i in sel}
         self._highlighted_lines = lines
+        if len(sel) == 1:
+            self.detail.show(self.commands[sel[0]])
         self._render()
+
+    def _on_detail_dirty(self) -> None:
+        # Args edited in the detail panel affect the trajectory. Re-run the
+        # simulator against the current commands so the canvas reflects
+        # the in-progress edit. Save-to-disk is still gated by the user
+        # clicking "保存到文件".
+        self.segments = self.simulator.run(self.commands)
+        self.highlight = HighlightMap(self.commands, self.segments)
+        self._t_current = min(self._t_current, self.simulator.total_duration)
+        self._render()
+        self._update_pose_status()
+
+    def _on_detail_saved(self) -> None:
+        # Re-read the file from disk and reparse so commands reflect the
+        # saved state (preserves any edits to nearby context lines).
+        if not self.current_path:
+            return
+        self._load(self.current_path)
+        self._set_status("已保存到文件")
+
+    def _on_detail_discarded(self) -> None:
+        self._set_status("已撤销改动")
 
     def _on_listbox_right_click(self, event: Any) -> None:
         row = self.listbox.nearest(event.y)
@@ -745,6 +792,7 @@ class MainWindow:
                 self.listbox.activate(i)
                 self.listbox.see(i)
                 self._highlighted_lines = {line}
+                self.detail.show(cmd)
                 self._render()
                 return
 

@@ -19,6 +19,9 @@ class ChassisCommand:
     line: int
     raw: str
     args: dict[str, Any] = field(default_factory=dict)
+    raw_with_indent: str = ""           # full line incl. leading whitespace + trailing // comments
+    arg_offsets: dict[str, tuple[int, int]] = field(default_factory=dict)
+                                        # arg_name → (start, end) within raw_with_indent
 
 
 @dataclass
