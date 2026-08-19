@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import ttkbootstrap as ttkb
+from ttkbootstrap.constants import BOTH, LEFT, RIGHT, X
 
 from .settings import Settings
 
