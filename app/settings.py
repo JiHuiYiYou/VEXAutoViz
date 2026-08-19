@@ -25,6 +25,7 @@ class Settings:
     linear_speed_in_s: float = 24.0  # playback linear speed (inches / second)
     angular_speed_deg_s: float = 90.0  # playback angular speed (degrees / second)
     stop_hold_seconds: float = 0.5   # visual hold time for STOP segments
+    hide_voltage_threshold: float = 2.5  # V — DRIVE 电压 ≤ 此值在右键批量隐藏时视为顶桩
 
     def reset_to_defaults(self) -> None:
         for f in fields(self):

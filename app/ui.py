@@ -112,6 +112,10 @@ class MainWindow:
         self._t_x: float = self.settings.initial_x
         self._t_y: float = self.settings.initial_y
         self._t_h: float = self.settings.initial_heading
+        # Session-only set of `line` numbers whose segments are hidden.
+        # Hidden segments are skipped when running the simulator, so later
+        # segments chain directly off the previous visible one's end.
+        self.hidden_lines: set[int] = set()
 
         self._build_toolbar()
         self._build_panes()
@@ -162,6 +166,7 @@ class MainWindow:
         )
         self.listbox.pack(fill=BOTH, expand=True)
         self.listbox.bind("<<ListboxSelect>>", self._on_listbox_select)
+        self.listbox.bind("<Button-3>", self._on_listbox_right_click)
         # Bind arrow keys to root so they work regardless of focus (canvas,
         # toolbar, etc.). _select_adjacent returns "break" to suppress the
         # Tk Listbox's default Up/Down multi-select / anchor behavior.
@@ -219,8 +224,12 @@ class MainWindow:
         self.view_offset_x = 0.0
         self.view_offset_y = 0.0
         self._auto_scale = True
+        self.hidden_lines.clear()
         self._reset_playback()
-        self._render()
+        if self.commands:
+            self._refresh_segments()
+        else:
+            self._render()
 
     def open_settings(self) -> None:
         SettingsDialog(self.root, self.settings, on_apply=self._apply_settings)
@@ -252,6 +261,7 @@ class MainWindow:
         self.root.title(f"VEX Auto Visualizer — {path}")
 
         self.commands = self.parser.parse(content)
+        self.hidden_lines.clear()
         self.segments = self.simulator.run(self.commands)
         self.highlight = HighlightMap(self.commands, self.segments)
         self._highlighted_lines.clear()
@@ -267,8 +277,13 @@ class MainWindow:
     def _populate_listbox(self) -> None:
         self.listbox.delete(0, END)
         for i, cmd in enumerate(self.commands):
-            self.listbox.insert(END, _format_row(cmd))
-            self.listbox.itemconfigure(i, foreground=_row_color(cmd))
+            text = _format_row(cmd)
+            color = _row_color(cmd)
+            if cmd.line in self.hidden_lines:
+                text = "[隐藏] " + text
+                color = "#666666"
+            self.listbox.insert(END, text)
+            self.listbox.itemconfigure(i, foreground=color)
 
     def _render(self) -> None:
         self.canvas.delete("all")
@@ -599,6 +614,73 @@ class MainWindow:
         self._highlighted_lines = lines
         self._render()
 
+    def _on_listbox_right_click(self, event: Any) -> None:
+        row = self.listbox.nearest(event.y)
+        if row < 0 or row >= len(self.commands):
+            return
+        self.listbox.selection_clear(0, END)
+        self.listbox.selection_set(row)
+        self.listbox.activate(row)
+        line = self.commands[row].line
+        is_hidden = line in self.hidden_lines
+
+        menu = tk.Menu(self.root, tearoff=0)
+        if is_hidden:
+            menu.add_command(label="取消隐藏此段",
+                             command=lambda ln=line: self._unhide_line(ln))
+        else:
+            menu.add_command(label="隐藏此段",
+                             command=lambda ln=line: self._hide_line(ln))
+        # Bulk: hide all DRIVE segments whose voltage is at or below the
+        # configured threshold. Always offer this option; the threshold lives
+        # in settings so users can tune it.
+        if not is_hidden:
+            thr = self.settings.hide_voltage_threshold
+            menu.add_command(
+                label=f"隐藏所有 ≤{thr:.1f}v 的 DRIVE 段",
+                command=lambda t=thr: self._hide_below_voltage(t))
+        menu.add_separator()
+        menu.add_command(label="全部取消隐藏",
+                         command=self._unhide_all)
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def _hide_line(self, line: int) -> None:
+        self.hidden_lines.add(line)
+        self._refresh_segments()
+
+    def _unhide_line(self, line: int) -> None:
+        self.hidden_lines.discard(line)
+        self._refresh_segments()
+
+    def _hide_below_voltage(self, threshold: float) -> None:
+        for cmd in self.commands:
+            if cmd.kind != CommandKind.DRIVE:
+                continue
+            try:
+                v = float(cmd.args.get("drive_max_voltage", 0))
+            except (TypeError, ValueError):
+                continue
+            if 0 < v <= threshold:
+                self.hidden_lines.add(cmd.line)
+        self._refresh_segments()
+
+    def _unhide_all(self) -> None:
+        if not self.hidden_lines:
+            return
+        self.hidden_lines.clear()
+        self._refresh_segments()
+
+    def _refresh_segments(self) -> None:
+        """Re-run the simulator against visible commands only, then redraw."""
+        visible_cmds = [c for c in self.commands if c.line not in self.hidden_lines]
+        self.segments = self.simulator.run(visible_cmds)
+        self.highlight = HighlightMap(visible_cmds, self.segments)
+        # Clamp playback time so a hide that shortens the trail doesn't leave
+        # the slider pointing past the end.
+        self._t_current = min(self._t_current, self.simulator.total_duration)
+        self._populate_listbox()
+        self._sync_slider_and_highlight()
+
     def _select_adjacent(self, delta: int) -> str:
         """Single-row nav: delta=-1 for prev (←/↑), +1 for next (→/↓).
 
@@ -739,7 +821,7 @@ class SettingsDialog:
 
         self.win = ttkb.Toplevel(parent)
         self.win.title("设置")
-        self.win.geometry("320x280")
+        self.win.geometry("320x310")
         self.win.transient(parent)
         self.win.grab_set()
 
@@ -756,6 +838,7 @@ class SettingsDialog:
             ("linear_speed_in_s",  "直行速度 (in/s)",      settings.linear_speed_in_s),
             ("angular_speed_deg_s","转向速度 (°/s)",       settings.angular_speed_deg_s),
             ("stop_hold_seconds",  "STOP 停留 (s)",        settings.stop_hold_seconds),
+            ("hide_voltage_threshold","隐藏电压阈值 (V)",   settings.hide_voltage_threshold),
         ]
         for i, (key, label, value) in enumerate(rows):
             ttkb.Label(frame, text=label).grid(row=i, column=0, sticky="w", pady=2)
