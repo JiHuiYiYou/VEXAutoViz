@@ -845,8 +845,12 @@ class SettingsDialog:
             ttkb.Label(frame, text=label).grid(row=i, column=0, sticky="w", pady=2)
             var = tk.StringVar(value=str(value))
             self._vars[key] = var
-            ttkb.Entry(frame, textvariable=var, width=12).grid(
-                row=i, column=1, sticky="e", pady=2)
+            entry = ttkb.Entry(frame, textvariable=var, width=12)
+            entry.grid(row=i, column=1, sticky="e", pady=2)
+            # Pressing Enter in any field applies (mirrors typical dialogs
+            # where Enter = OK and avoids the user typing a value and
+            # forgetting to click the Apply button).
+            entry.bind("<Return>", lambda _e: self._apply())
 
         btn_bar = ttkb.Frame(self.win, padding=(15, 0, 15, 15))
         btn_bar.pack(fill=X)
