@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import math
 import tkinter as tk
-from tkinter import filedialog, font
+from pathlib import Path
+from tkinter import filedialog, font, messagebox
 from typing import Any
 
 import ttkbootstrap as ttkb
@@ -11,6 +12,7 @@ from ttkbootstrap.constants import (
     BOTH, BOTTOM, END, HORIZONTAL, LEFT, RIGHT, TOP, X, Y,
 )
 
+from . import drawing
 from .background import BackgroundManager
 from .background_dialog import BackgroundDialog
 from .commands import ChassisCommand, CommandKind, TrajectorySegment
@@ -27,6 +29,18 @@ START_COLOR = "#88ff88"
 START_RADIUS = 9
 HIGHLIGHT_COLOR = "#ffeb3b"
 HIGHLIGHT_WIDTH_BOOST = 3
+
+# Endpoint marker (user-selected "key points") — cyan diamond, distinct
+# from the green start dot and the magenta/cyan turn wedges.
+MARKER_COLOR = "#00d4ff"
+MARKER_OUTLINE = "#0a3a4a"
+MARKER_HALF = 9          # half side length of the diamond (canvas px)
+# Drawing-mode overlay (polyline in progress).
+DRAW_COLOR = "#00d4ff"
+DRAW_POINT_RADIUS = 5
+# Snap radius in world inches — clicks within this distance of a marked
+# endpoint snap to that endpoint.
+SNAP_RADIUS_IN = 3.0
 
 COMPASS_RADIUS = 32
 COMPASS_HIT_RADIUS = 44
@@ -120,6 +134,20 @@ class MainWindow:
         # Hidden segments are skipped when running the simulator, so later
         # segments chain directly off the previous visible one's end.
         self.hidden_lines: set[int] = set()
+        # Session-only set of `line` numbers whose END waypoint is marked
+        # as a "key point" by the user. Drawn as cyan diamonds on the canvas.
+        # Used both as a visual hint and as snap targets in drawing mode.
+        self.marked_lines: set[int] = set()
+        # Absolute world (x, y) at the moment the marker was created. Frozen
+        # so editing / hiding / deleting upstream segments doesn't drift the
+        # marker's visible position. Keyed by line number, same as above.
+        self.marker_positions: dict[int, tuple[float, float]] = {}
+        # Drawing-mode state. Activated by toolbar [📐 绘制] or `D` key.
+        self._drawing_mode: bool = False
+        self._drawing_start_line: int | None = None
+        self._drawing_start_world: tuple[float, float] | None = None
+        self._drawing_polyline: list[tuple[float, float]] = []
+        self._draw_btn: Any = None
 
         self._build_toolbar()
         self._build_panes()
@@ -131,6 +159,14 @@ class MainWindow:
         self.canvas.bind("<B1-Motion>", self._on_canvas_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_canvas_release)
         self.canvas.bind("<MouseWheel>", self._on_canvas_wheel)
+        self.canvas.bind("<Button-3>", self._on_canvas_right_click)
+
+        # Key bindings — bound at root so they work regardless of focus.
+        self.root.bind("<KeyPress-d>",   lambda _e: self._toggle_drawing())
+        self.root.bind("<KeyPress-D>",   lambda _e: self._toggle_drawing())
+        self.root.bind("<Escape>",       lambda _e: self._on_escape())
+        self.root.bind("<Delete>",       lambda _e: self._on_delete_key())
+        self.root.bind("<BackSpace>",    lambda _e: self._on_delete_key())
 
     def _make_simulator(self) -> Simulator:
         return Simulator(self.settings)
@@ -147,6 +183,11 @@ class MainWindow:
                     bootstyle="secondary").pack(side=LEFT, padx=(0, 5))
         ttkb.Button(bar, text="背景", command=self.open_background,
                     bootstyle="secondary").pack(side=LEFT, padx=(0, 5))
+        # Toggle button — `bootstyle="info-outline"` flips to `info` when
+        # drawing mode is active. See `_set_drawing_mode` for the toggle.
+        self._draw_btn = ttkb.Button(bar, text="📐 绘制", command=self._toggle_drawing,
+                                     bootstyle="info-outline")
+        self._draw_btn.pack(side=LEFT, padx=(0, 5))
         ttkb.Button(bar, text="复位视角", command=self.reset_view,
                     bootstyle="secondary").pack(side=LEFT, padx=(0, 5))
 
@@ -242,6 +283,9 @@ class MainWindow:
         self.view_offset_y = 0.0
         self._auto_scale = True
         self.hidden_lines.clear()
+        # Markers are session-only visual annotations; reset wipes them.
+        self.marked_lines.clear()
+        self.marker_positions.clear()
         self._reset_playback()
         if self.commands:
             self._refresh_segments()
@@ -252,14 +296,21 @@ class MainWindow:
         SettingsDialog(self.root, self.settings, on_apply=self._apply_settings)
 
     def open_background(self) -> None:
-        BackgroundDialog(self.root, self.settings, on_apply=self._apply_settings)
+        BackgroundDialog(self.root, self.settings,
+                         on_apply=self._apply_settings,
+                         on_change=self._background_changed)
+
+    def _background_changed(self) -> None:
+        """Live update from BackgroundDialog — main canvas reflects mid-edit."""
+        self.background.invalidate_cache()
+        self._render()
 
     def _apply_settings(self, new_settings: Settings) -> None:
         self.settings = new_settings
         save_settings(new_settings)
         self.view_rotation = new_settings.view_rotation
         self.simulator = self._make_simulator()
-        self.background = BackgroundManager(new_settings)
+        self.background.invalidate_cache()
         if self.commands:
             self.segments = self.simulator.run(self.commands)
             self.highlight = HighlightMap(self.commands, self.segments)
@@ -283,6 +334,15 @@ class MainWindow:
 
         self.commands = self.parser.parse(content)
         self.hidden_lines.clear()
+        # Drop markers whose lines no longer exist after an external edit to
+        # Auto.cpp. Internal `_delete_segment` already cleaned up its own
+        # line first, but for symmetry we still drop any orphans here.
+        # IMPORTANT: `marker_positions` is NOT cleared — frozen positions
+        # survive even when the line that originally produced them is gone,
+        # so the user can keep visually anchoring a "key point" after
+        # deleting the segment that used to land on it.
+        valid_lines = {c.line for c in self.commands}
+        self.marked_lines &= valid_lines
         self.segments = self.simulator.run(self.commands)
         self.highlight = HighlightMap(self.commands, self.segments)
         self._highlighted_lines.clear()
@@ -335,6 +395,16 @@ class MainWindow:
             self._draw_segment(seg)
         self._draw_start_marker()
         self._draw_robot_marker()
+        # User-marked endpoint diamonds — drawn after the trajectory so they
+        # stay visible, but before the compass so HUD never gets obscured.
+        # Iteration is over `marker_positions` (not `marked_lines`), so a
+        # marker stays on the canvas even after its original segment was
+        # deleted — that's the "key point survives segment deletion"
+        # semantic the user asked for.
+        for line, world_xy in self.marker_positions.items():
+            self._draw_endpoint_marker(world_xy, line)
+        if self._drawing_mode and self._drawing_polyline:
+            self._draw_polyline_overlay()
         self._draw_compass(w, h)
 
     def _draw_grid(self, w: int, h: int) -> None:
@@ -563,6 +633,11 @@ class MainWindow:
             self._dragging_compass = True
             self._update_rotation_from_event(event)
             return
+        if self._drawing_mode:
+            # In drawing mode, left-click adds a polyline point (after start).
+            # Right-click is handled separately in `_on_canvas_right_click`.
+            self._on_drawing_click(event)
+            return
         self._press_x = event.x
         self._press_y = event.y
         self._last_drag_x = event.x
@@ -700,6 +775,19 @@ class MainWindow:
         menu.add_separator()
         menu.add_command(label="全部取消隐藏",
                          command=self._unhide_all)
+        # Marker toggle (per-line).
+        if line in self.marked_lines:
+            menu.add_command(label="取消标记此段终点 🔖",
+                             command=lambda ln=line: (
+                                 self.marked_lines.discard(ln),
+                                 self._render()))
+        else:
+            menu.add_command(label="标记此段终点 🔖",
+                             command=lambda ln=line: self._toggle_marker(ln))
+        menu.add_separator()
+        # Delete (destructive — confirm before splicing the file).
+        menu.add_command(label="删除此段 (会改 Auto.cpp)",
+                         command=lambda ln=line: self._prompt_and_delete(ln))
         menu.tk_popup(event.x_root, event.y_root)
 
     def _hide_line(self, line: int) -> None:
@@ -807,7 +895,328 @@ class MainWindow:
                 self._render()
                 return
 
-    # ---- playback ----
+    # ---- markers / delete / drawing ----
+
+    def _draw_endpoint_marker(self, world_xy: tuple[float, float],
+                              line: int) -> None:
+        """Cyan diamond at the END waypoint of the marked segment."""
+        cx, cy = self._to_canvas(*world_xy)
+        h = MARKER_HALF
+        pts = [cx, cy - h, cx + h, cy, cx, cy + h, cx - h, cy]
+        self.canvas.create_polygon(
+            *pts, fill=MARKER_COLOR, outline=MARKER_OUTLINE, width=2,
+            tags=("endpoint", f"endpoint_{line}"))
+        # Tiny line-number badge so the user can tell which marker is which
+        # when several are clustered.
+        self.canvas.create_text(
+            cx, cy - h - 9, text=f"L{line}",
+            fill=MARKER_COLOR, font=("Arial", 8, "bold"),
+            tags=("endpoint", f"endpoint_{line}"))
+
+    def _toggle_marker(self, line: int) -> None:
+        # Cancel path: only act when something actually exists for this line.
+        # If the segment was deleted, `line` is no longer in `marked_lines`,
+        # but its frozen position may still be in `marker_positions` —
+        # cancel must still remove it (otherwise the user has no way to
+        # clean up an orphan marker).
+        if line in self.marked_lines or line in self.marker_positions:
+            self.marked_lines.discard(line)
+            self.marker_positions.pop(line, None)
+            verb = "取消标记"
+        else:
+            self.marked_lines.add(line)
+            # Snapshot the END waypoint as an absolute world coord so the
+            # marker stays put regardless of upstream edits.
+            world_xy = self._current_end_of(line)
+            if world_xy is not None:
+                self.marker_positions[line] = world_xy
+            verb = "已标记"
+        self._render()
+        self._set_status(f"{verb}第 {line} 行端点")
+
+    def _current_end_of(self, line: int) -> tuple[float, float] | None:
+        """Return the END waypoint of `line`'s segment right now, or None."""
+        seg_idx = self.highlight.line_to_segment_idx.get(line)
+        if seg_idx is None:
+            return None
+        return self.segments[seg_idx].waypoints[-1]
+
+    def _delete_segment(self, line: int) -> None:
+        """Splice a single command line out of Auto.cpp and reload.
+
+        Distinct from `_hide_line` (which only does a visual skip). This
+        permanently edits the file — caller must have confirmed via
+        `messagebox.askyesno` first.
+        """
+        cmd = next((c for c in self.commands if c.line == line), None)
+        if cmd is None or self.current_path is None:
+            return
+        path = Path(self.current_path)
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            self._set_status(f"读取失败: {exc}")
+            return
+        # 1-based → 0-based line index.
+        idx = line - 1
+        lines = raw.split("\n")
+        if idx < 0 or idx >= len(lines):
+            self._set_status(f"行号 {line} 越界")
+            return
+        deleted_text = lines[idx]
+        del lines[idx]
+        # Also drop any comment-only lines that immediately follow the
+        # deleted command (the user's usual convention is `// foo` right
+        # after `chassis.drive_distance(...);`).
+        while idx < len(lines) and lines[idx].lstrip().startswith("//"):
+            del lines[idx]
+        try:
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        except OSError as exc:
+            self._set_status(f"写入失败: {exc}")
+            return
+        self._load(str(path))
+        self._set_status(
+            f"已删除第 {line} 行 ({deleted_text.strip()[:50]}),可通过 git 恢复")
+
+    def _toggle_drawing(self) -> None:
+        if self._drawing_mode:
+            self._cancel_drawing()
+        else:
+            self._set_drawing_mode(True)
+
+    def _set_drawing_mode(self, on: bool) -> None:
+        self._drawing_mode = on
+        if on:
+            self.canvas.config(cursor="crosshair")
+            self._draw_btn.configure(bootstyle="info")
+            self._set_status(
+                "绘制模式:右键一个端点开始画,ESC 完成,右键任意端点替换起点")
+        else:
+            self.canvas.config(cursor="")
+            self._draw_btn.configure(bootstyle="info-outline")
+            self._drawing_start_line = None
+            self._drawing_start_world = None
+            self._drawing_polyline = []
+
+    def _cancel_drawing(self) -> None:
+        self._set_drawing_mode(False)
+        self._set_status("已退出绘制模式")
+
+    def _on_escape(self) -> None:
+        # ESC has dual semantics: when a polyline is in progress, finalize
+        # it; otherwise just exit drawing mode.
+        if self._drawing_mode:
+            if self._drawing_polyline:
+                self._finalize_drawing()
+            else:
+                self._cancel_drawing()
+
+    def _on_delete_key(self) -> None:
+        sel = self.listbox.curselection()
+        if not sel:
+            return
+        row = sel[0]
+        if row >= len(self.commands):
+            return
+        self._prompt_and_delete(self.commands[row].line)
+
+    def _prompt_and_delete(self, line: int) -> None:
+        cmd = next((c for c in self.commands if c.line == line), None)
+        if cmd is None:
+            return
+        body = cmd.raw_with_indent.rstrip()
+        ok = messagebox.askyesno(
+            "确认删除",
+            f"将删除第 {line} 行:\n\n{body}\n\n"
+            "此操作不可撤销(可通过 git 或备份恢复)。\n继续?",
+            parent=self.root)
+        if ok:
+            self._delete_segment(line)
+
+    def _on_canvas_right_click(self, event: Any) -> None:
+        if self._drawing_mode:
+            self._on_drawing_right_click(event)
+            return
+        # Hit-test: prefer marker hits over segment hits, so users can
+        # remove a marker even if it's drawn on top of a trajectory line.
+        items = self.canvas.find_overlapping(event.x, event.y, event.x, event.y)
+        for item in items:
+            tags = self.canvas.gettags(item)
+            end_tag = next((t for t in tags if t.startswith("endpoint_")), None)
+            if end_tag:
+                line = int(end_tag.split("_")[1])
+                menu = tk.Menu(self.root, tearoff=0)
+                menu.add_command(label="取消标记",
+                                 command=lambda ln=line: (
+                                     self.marked_lines.discard(ln),
+                                     self._render(),
+                                     self._set_status(f"取消标记第 {line} 行")))
+                menu.tk_popup(event.x_root, event.y_root)
+                return
+
+    def _on_drawing_click(self, event: Any) -> None:
+        """In drawing mode: left-click adds the next polyline point.
+
+        If no start is set yet, the click is silently ignored — start is
+        chosen via right-click only (matches the plan: "右键一个端点开始画").
+        """
+        if self._drawing_start_world is None:
+            return
+        m_w = self._preview_to_world(event.x, event.y)
+        snapped = self._snap_to_marked(m_w)
+        self._drawing_polyline.append(snapped)
+        self._render()
+
+    def _on_drawing_right_click(self, event: Any) -> None:
+        """In drawing mode: right-click picks a segment's END as start."""
+        items = self.canvas.find_overlapping(event.x, event.y, event.x, event.y)
+        # Prefer endpoint marker hits (most precise — the user is "clicking
+        # at a key point"). Fall back to any segment tag if no marker is
+        # at the cursor.
+        target_line: int | None = None
+        for item in items:
+            tags = self.canvas.gettags(item)
+            end_tag = next((t for t in tags if t.startswith("endpoint_")), None)
+            if end_tag:
+                target_line = int(end_tag.split("_")[1])
+                break
+        if target_line is None:
+            for item in items:
+                tags = self.canvas.gettags(item)
+                seg_tag = next((t for t in tags if t.startswith("seg_")), None)
+                if seg_tag:
+                    target_line = int(seg_tag.split("_")[1])
+                    break
+        if target_line is None:
+            return
+        seg_idx = self.highlight.line_to_segment_idx.get(target_line)
+        if seg_idx is None:
+            return
+        end_xy = self.segments[seg_idx].waypoints[-1]
+        self._start_drawing_from(target_line, end_xy)
+
+    def _start_drawing_from(self, line: int, world_xy: tuple[float, float]) -> None:
+        """Set (or reset) the polyline's start point and clear in-progress points."""
+        self._drawing_start_line = line
+        self._drawing_start_world = world_xy
+        self._drawing_polyline = []
+        self._render()
+        self._set_status(
+            f"起点:第 {line} 行 ({world_xy[0]:+.1f}, {world_xy[1]:+.1f}) "
+            "— 左键加点(近标记自动吸附),ESC 完成")
+
+    def _finalize_drawing(self) -> None:
+        """Compile the polyline into C++ and splice it after the start line."""
+        if (self._drawing_start_line is None
+                or self._drawing_start_world is None
+                or not self._drawing_polyline):
+            self._cancel_drawing()
+            return
+        # Recover the simulator's heading at the start moment so the
+        # first turn delta is correct (relative to robot's actual heading
+        # at that point in the trajectory).
+        seg_idx = self.highlight.line_to_segment_idx.get(
+            self._drawing_start_line)
+        if seg_idx is None:
+            heading = 0.0
+        else:
+            seg = self.segments[seg_idx]
+            # TURN: arrow_heading = target (post-turn heading).
+            # DRIVE: arrow_heading is None → use entry_heading (heading
+            # while driving).
+            heading = seg.arrow_heading if seg.arrow_heading is not None else seg.entry_heading
+            # Last-resort fallback: derive from displacement.
+            if heading == 0.0 and len(seg.waypoints) >= 2:
+                (x0, y0), (x1, y1) = seg.waypoints[:2]
+                heading = drawing.heading_from_vector(x1 - x0, y1 - y0)
+        cmds = drawing.polyline_to_commands(
+            self._drawing_start_world, self._drawing_polyline, heading)
+        if not cmds:
+            self._set_status("没有可生成的命令(距离都太短),已退出绘制模式")
+            self._cancel_drawing()
+            return
+        new_lines = drawing.render_cpp_lines(cmds)
+        path = Path(self.current_path)
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            self._set_status(f"读取失败: {exc}")
+            return
+        lines = raw.split("\n")
+        insert_at = self._drawing_start_line  # append after start line (1-based)
+        lines = lines[:insert_at] + new_lines + lines[insert_at:]
+        try:
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        except OSError as exc:
+            self._set_status(f"写入失败: {exc}")
+            return
+        n = len(new_lines)
+        self._set_drawing_mode(False)
+        self._load(str(path))
+        self._set_status(
+            f"已插入 {n} 行命令到第 {self._drawing_start_line} 行之后")
+
+    def _preview_to_world(self, cx: float, cy: float) -> tuple[float, float]:
+        """Inverse of `_to_canvas` — used for click → world coords."""
+        θ = math.radians(self.view_rotation)
+        w = self.canvas.winfo_width()
+        h = self.canvas.winfo_height()
+        rx = (cx - w / 2 - self.view_offset_x) / self._scale
+        ry = -(cy - h / 2 - self.view_offset_y) / self._scale
+        # rotate by -θ
+        x = rx * math.cos(-θ) + ry * math.sin(-θ)
+        y = -rx * math.sin(-θ) + ry * math.cos(-θ)
+        return (x, y)
+
+    def _snap_to_marked(self, world_xy: tuple[float, float]) -> tuple[float, float]:
+        """If click is within SNAP_RADIUS_IN of a marked END, snap to it.
+
+        Uses frozen `marker_positions` — so drawing-mode snaps land on the
+        same world point that the user sees the marker at, even if the
+        segment that originally produced it has since moved.
+        """
+        if not self.marked_lines:
+            return world_xy
+        x, y = world_xy
+        best_line: int | None = None
+        best_d2 = SNAP_RADIUS_IN * SNAP_RADIUS_IN
+        best_xy: tuple[float, float] | None = None
+        for line, (mx, my) in self.marker_positions.items():
+            d2 = (mx - x) ** 2 + (my - y) ** 2
+            if d2 < best_d2:
+                best_d2 = d2
+                best_line = line
+                best_xy = (mx, my)
+        if best_line is not None and best_xy is not None:
+            self._set_status(f"↪ 已吸附到第 {best_line} 行端点")
+            return best_xy
+        return world_xy
+
+    def _draw_polyline_overlay(self) -> None:
+        """Dashed polyline + vertex dots for the in-progress draw."""
+        pts_world: list[tuple[float, float]] = (
+            [self._drawing_start_world] if self._drawing_start_world else []
+        ) + list(self._drawing_polyline)
+        # Segments.
+        for (ax, ay), (bx, by) in zip(pts_world, pts_world[1:]):
+            cxa, cya = self._to_canvas(ax, ay)
+            cxb, cyb = self._to_canvas(bx, by)
+            self.canvas.create_line(
+                cxa, cya, cxb, cyb,
+                fill=DRAW_COLOR, width=2, dash=(4, 4),
+                tags=("drawing",))
+        # Vertices (skip the start — already shown as the picked segment's
+        # own END marker).
+        for (vx, vy) in self._drawing_polyline:
+            cvx, cvy = self._to_canvas(vx, vy)
+            r = DRAW_POINT_RADIUS
+            self.canvas.create_oval(
+                cvx - r, cvy - r, cvx + r, cvy + r,
+                fill=DRAW_COLOR, outline="white", width=1,
+                tags=("drawing",))
+
+# ---- playback ----
 
     def _toggle_play(self) -> None:
         self._is_playing = not self._is_playing
