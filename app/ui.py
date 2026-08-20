@@ -298,7 +298,8 @@ class MainWindow:
     def open_background(self) -> None:
         BackgroundDialog(self.root, self.settings,
                          on_apply=self._apply_settings,
-                         on_change=self._background_changed)
+                         on_change=self._background_changed,
+                         view_rotation=self.view_rotation)
 
     def _background_changed(self) -> None:
         """Live update from BackgroundDialog — main canvas reflects mid-edit."""

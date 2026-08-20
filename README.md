@@ -12,6 +12,7 @@
 - 左栏列表 + 右栏画布；点击任一侧，对应项目在另一侧高亮黄色
 - `chassis.get_absolute_heading()` 自动解析为当前航向（包括 `get_absolute_heading() - 180` 这种相对转技巧）
 - 设置面板：起点 X/Y/航向、缩放、轮胎直径、轮距；保存到 `~/.vexautoviz.json`
+- 背景图：WeChat 修图样式的可视化编辑器 — 4 角手柄拖动 / 90° 旋转 / 一键对齐场地角 / 透明度 / 显隐；主画布实时预览，保存到 `~/.vexautoviz.json`
 - 路径端点标记：右键 listbox 行或画布上的 marker 即可把段终点标成青蓝色菱形 (`🔖 L<n>`)；标记只在本次会话内有效，重启重置
 - 删除段（区别于隐藏）：弹 modal 确认后直接从 `Auto.cpp` 删除该行，文件会被改写；标记随段自动清理；可通过 git 恢复
 - 画布绘制 polyline：工具栏 `[📐 绘制]` 进入绘制模式 → 右键选起点（必须是某段 END）→ 左键连续加点（近标记自动吸附）→ ESC 完成；自动生成 `turn_to_angle` + `drive_distance` 行并插入 `Auto.cpp`
@@ -63,6 +64,8 @@ VEXAutoViz/
 │   ├── simulator.py        # Simulator — point-turn model
 │   ├── highlight.py        # HighlightMap — line ↔ segment 双向查找
 │   ├── settings.py         # Settings dataclass + ~/.vexautoviz.json 持久化
+│   ├── background.py       # BackgroundManager — PIL → PhotoImage, cached draw
+│   ├── background_dialog.py  # WeChat-style transform editor (4 corners / rotate / align)
 │   ├── drawing.py          # Polyline → C++ command generation (heading / drive / turn)
 │   └── ui.py               # MainWindow + SettingsDialog
 ├── tests/

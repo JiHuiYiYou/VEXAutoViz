@@ -83,6 +83,11 @@ class BackgroundManager:
 
     # ---- internal ----
 
+    def invalidate_cache(self) -> None:
+        """Drop the cached PhotoImage so the next draw() re-PILs."""
+        self._cache_key = None
+        self._tk_image = None
+
     def _render_image(self, view_scale: float) -> Any | None:
         s = self.settings
         img = self._raw_image
