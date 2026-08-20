@@ -1013,6 +1013,11 @@ class MainWindow:
                 self._cancel_drawing()
 
     def _on_delete_key(self) -> None:
+        # Don't fire when the user is editing text — <BackSpace> in the
+        # detail-panel Entry must edit the field, not delete the segment.
+        focused = self.root.focus_get()
+        if isinstance(focused, (tk.Entry, ttkb.Entry, tk.Text)):
+            return
         sel = self.listbox.curselection()
         if not sel:
             return
