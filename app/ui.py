@@ -803,6 +803,7 @@ class MainWindow:
             menu.add_command(label="取消标记此段终点 🔖",
                              command=lambda ln=line: (
                                  self.marked_lines.discard(ln),
+                                 self.marker_positions.pop(ln, None),
                                  self._render()))
         else:
             menu.add_command(label="标记此段终点 🔖",
@@ -1072,8 +1073,9 @@ class MainWindow:
                 menu.add_command(label="取消标记",
                                  command=lambda ln=line: (
                                      self.marked_lines.discard(ln),
+                                     self.marker_positions.pop(ln, None),
                                      self._render(),
-                                     self._set_status(f"取消标记第 {line} 行")))
+                                     self._set_status(f"取消标记第 {ln} 行")))
                 menu.tk_popup(event.x_root, event.y_root)
                 return
 
