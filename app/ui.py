@@ -715,16 +715,38 @@ class MainWindow:
         self.view_offset_y = my - pre_dy * real_factor - h / 2
         self._render()
 
+    def _select_listbox_row(self, row: int) -> None:
+        """Set listbox selection + cursor + scroll to `row` (assumed in range)."""
+        self.listbox.selection_clear(0, END)
+        self.listbox.selection_set(row)
+        self.listbox.activate(row)
+        self.listbox.see(row)
+
     def _on_listbox_select(self, _event: Any) -> None:
         sel = self.listbox.curselection()
         if not sel:
             self.detail.show(None)
             return
+        row = sel[0]
         lines = {self.commands[i].line for i in sel}
+        # Pause so the click acts as a scrub; user resumes with Space.
+        # Mirrors _select_adjacent's "seek then settle" pattern.
+        if self._is_playing:
+            self._is_playing = False
+            self.play_btn.configure(text="▶")
+            if self._play_after_id is not None:
+                self.root.after_cancel(self._play_after_id)
+                self._play_after_id = None
+        # Seek _t_current to this row's segment start when available.
+        seg_idx = self.highlight.line_to_segment_idx.get(self.commands[row].line)
+        if seg_idx is not None:
+            segs = self.simulator._segments_cache
+            if seg_idx < len(segs):
+                self._t_current = segs[seg_idx].t_start
         self._highlighted_lines = lines
         if len(sel) == 1:
-            self.detail.show(self.commands[sel[0]])
-        self._render()
+            self.detail.show(self.commands[row])
+        self._sync_slider_and_highlight()
 
     def _on_detail_dirty(self) -> None:
         # Args edited in the detail panel affect the trajectory. Re-run the
@@ -851,10 +873,7 @@ class MainWindow:
         segs = self.simulator._segments_cache
         if new < len(segs):
             self._t_current = segs[new].t_start
-        self.listbox.selection_clear(0, END)
-        self.listbox.selection_set(new)
-        self.listbox.activate(new)
-        self.listbox.see(new)
+        self._select_listbox_row(new)
         # selection_clear + selection_set back-to-back inside one callback
         # can collapse <<ListboxSelect>> to a no-op; force the highlight refresh
         # explicitly so the canvas tracks the new selection.
@@ -887,10 +906,7 @@ class MainWindow:
         # find listbox row for this line
         for i, cmd in enumerate(self.commands):
             if cmd.line == line:
-                self.listbox.selection_clear(0, END)
-                self.listbox.selection_set(i)
-                self.listbox.activate(i)
-                self.listbox.see(i)
+                self._select_listbox_row(i)
                 self._highlighted_lines = {line}
                 self.detail.show(cmd)
                 self._render()
@@ -1272,6 +1288,16 @@ class MainWindow:
         line = self.simulator.line_at(self._t_current)
         if line is not None:
             self._highlighted_lines = {line}
+            # Drive listbox cursor from animation time. Skip if already on
+            # this row to keep the per-tick (30Hz) path cheap and to avoid
+            # re-firing <<ListboxSelect>> every frame.
+            current_sel = self.listbox.curselection()
+            target_row = next(
+                (i for i, c in enumerate(self.commands) if c.line == line),
+                None)
+            if target_row is not None and (
+                    not current_sel or current_sel[0] != target_row):
+                self._select_listbox_row(target_row)
         else:
             self._highlighted_lines.clear()
         self._render()
